@@ -1,0 +1,6 @@
+ultralytics
+opencv-python
+numpy
+python-dotenv
+Flask
+yt-dlp

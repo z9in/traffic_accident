@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실시간 교통사고 감지 시스템</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; }
+        h1 { text-align: center; color: #333; }
+        .form-container { text-align: center; margin-bottom: 20px; background-color: #fff; padding: 20px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 1200px; margin-left: auto; margin-right: auto; }
+        .form-container textarea { width: 95%; height: 100px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 10px; }
+        .form-container button { padding: 10px 20px; border: none; background-color: #5cb85c; color: white; border-radius: 4px; cursor: pointer; }
+        .form-container button:hover { background-color: #4cae4c; }
+        .error-message { color: #d9534f; margin-top: 10px; font-weight: bold; }
+        .main-container { display: flex; flex-direction: row; gap: 20px; justify-content: center; }
+        .streams-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 15px; flex-grow: 1; }
+        .video-container { border: 1px solid #ccc; background-color: #000; min-height: 225px; display: flex; align-items: center; justify-content: center; color: #fff; position: relative; }
+        .video-container img { max-width: 100%; display: block; }
+        .video-title { position: absolute; bottom: 5px; left: 5px; background-color: rgba(0,0,0,0.5); color: white; padding: 2px 5px; font-size: 0.8em; border-radius: 3px; }
+        .alert-container { width: 100%; max-width: 400px; flex-shrink: 0; }
+        h2 { color: #d9534f; }
+        #alerts { list-style-type: none; padding: 0; background-color: #fff; border: 1px solid #ddd; border-radius: 5px; max-height: 300px; overflow-y: auto; }
+        #alerts li { padding: 10px; border-bottom: 1px solid #eee; }
+        #alerts li:last-child { border-bottom: none; }
+        .alert-item { color: #c9302c; font-weight: bold; }
+        .timestamp { font-size: 0.8em; color: #777; margin-left: 10px; }
+    </style>
+</head>
+<body data-streams-active="{{ (streams|length > 0)|lower }}">
+
+    <h1>실시간 교통사고 감지 시스템</h1>
+
+    <div class="form-container">
+        <form method="POST" action="/">
+            <textarea name="youtube_urls" placeholder="분석할 YouTube 영상 URL을 한 줄에 하나씩 입력하세요">{{ youtube_urls_text or '' }}</textarea>
+            <button type="submit">분석 시작</button>
+        </form>
+        {% if error_message %}
+            <p class="error-message">{{ error_message }}</p>
+        {% endif %}
+    </div>
+
+    <div class="main-container">
+        <div class="streams-grid">
+            {% if streams %}
+                {% for stream_id, info in streams.items() %}
+                <div class="video-container">
+                    <img src="{{ url_for('video_feed', stream_id=stream_id) }}" alt="Live Stream {{ stream_id }}">
+                    <div class="video-title">{{ info.title[:50] }}{% if info.title|length > 50 %}...{% endif %}</div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div style="grid-column: 1 / -1; text-align: center; padding: 50px; color: #888;">
+                    URL을 입력하고 분석을 시작하세요.
+                </div>
+            {% endif %}
+        </div>
+
+        <div class="alert-container">
+            <h2>감지된 알림</h2>
+            <ul id="alerts">
+                <!-- 자바스크립트를 통해 알림이 여기에 추가됩니다. -->
+                <li>알림 대기 중...</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        // data-streams-active 속성을 읽어 비디오 분석 시작 여부를 확인합니다.
+        console.log("data-streams-active:", document.body.dataset.streamsActive); // 디버깅을 위해 추가
+        if (document.body.dataset.streamsActive === 'true') { // 이제 이 조건이 올바르게 작동합니다.
+            // Server-Sent Events를 통해 서버로부터 실시간 알림을 받습니다.
+            const alertList = document.getElementById('alerts');
+            const eventSource = new EventSource("{{ url_for('events') }}");
+
+            eventSource.onopen = function() {
+                console.log("알림 서버에 연결되었습니다.");
+                alertList.innerHTML = '<li>알림 대기 중...</li>';
+            };
+
+            eventSource.onmessage = function(event) {
+                const alertData = JSON.parse(event.data);
+                console.log("새로운 알림 수신:", alertData);
+                if (alertList.querySelector('li').textContent === '알림 대기 중...') {
+                    alertList.innerHTML = ''; // 초기 메시지 제거
+                }
+                const newAlert = `<li><span class="alert-item">${alertData.message}</span><span class="timestamp">${alertData.timestamp}</span></li>`;
+                alertList.insertAdjacentHTML('afterbegin', newAlert); // 새 알림을 맨 위에 추가
+            };
+
+            eventSource.onerror = function(err) {
+                console.error("EventSource 실패:", err);
+                alertList.innerHTML = '<li>알림 서버 연결에 실패했습니다.</li>';
+            };
+        }
+    </script>
+
+    <div style="text-align: center; margin-top: 30px;">
+        <!-- 2단계: 'about' 페이지로 가는 링크 추가 -->
+        <a href="{{ url_for('about') }}">이 시스템에 대하여</a>
+    </div>
+
+</body>
+</html>
