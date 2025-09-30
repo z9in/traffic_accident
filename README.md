@@ -2,9 +2,6 @@
 
 YOLOv8 모델을 활용하여 YouTube와 같은 실시간 비디오 스트림에서 교통사고를 감지하고 웹을 통해 알림을 제공하는 시스템입니다.
 
-![Project Screenshot](https://via.placeholder.com/800x450.png?text=프로젝트+스크린샷+추가+위치)
-*(여기에 프로젝트 실행 화면 스크린샷을 추가하세요.)*
-
 ---
 
 ## 🌟 주요 기능 (Key Features)
@@ -91,4 +88,5 @@ python app.py
 
 *   **Copyright**: © 2023 Ultralytics. All rights reserved.
 *   **License**: AGPL-3.0
+
 *   **Repository**: https://github.com/ultralytics/ultralytics
