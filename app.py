@@ -1,11 +1,15 @@
-from flask import Flask, render_template, Response, request
-import cv2
+from flask import Flask, render_template, Response, request, session, redirect, url_for, flash, g
+import cv2 
 import numpy as np
 from ultralytics import YOLO
 import os
 from dotenv import load_dotenv
 import time
+import queue
+import sqlite3
 import json
+import click
+from werkzeug.security import check_password_hash, generate_password_hash
 from datetime import datetime
 import yt_dlp
 
@@ -14,15 +18,67 @@ load_dotenv()
 CRASH_DISTANCE_THRESHOLD = int(os.getenv("CRASH_DISTANCE_THRESHOLD", 100))
 
 app = Flask(__name__)
+app.config.from_mapping(
+    DATABASE=os.path.join(app.instance_path, 'accident.sqlite'),
+)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "a_default_secret_key_for_development")
+
+# instance 폴더가 없으면 생성
+if not os.path.exists(app.instance_path):
+    os.makedirs(app.instance_path)
 
 # 전역 변수 설정
 model = YOLO('yolov8n.pt')
 video_streams = {}  # {stream_id: {'cap': cap_obj, 'title': '...', 'url': '...'}}
 
-latest_alert = {
-    "message": None,
-    "timestamp": None
-}
+# --- Database Functions ---
+def get_db():
+    """현재 요청에 대한 데이터베이스 연결을 가져옵니다."""
+    if 'db' not in g:
+        g.db = sqlite3.connect(
+            app.config['DATABASE'],
+            detect_types=sqlite3.PARSE_DECLTYPES
+        )
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+def close_db(e=None):
+    """데이터베이스 연결을 닫습니다."""
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    """데이터베이스 테이블을 초기화합니다."""
+    db = get_db()
+    with app.open_resource('schema.sql') as f: # 'schema.sql' 파일을 읽어 테이블을 생성합니다.
+        db.executescript(f.read().decode('utf8'))
+
+@click.command('init-db')
+def init_db_command():
+    """CLI: 데이터베이스를 초기화합니다."""
+    init_db()
+    click.echo('데이터베이스가 초기화되었습니다.')
+
+@click.command('add-user')
+@click.argument('username')
+@click.argument('password')
+def add_user_command(username, password):
+    """CLI: 새로운 사용자를 추가합니다."""
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO user (username, password) VALUES (?, ?)",
+            (username, generate_password_hash(password)),
+        )
+        db.commit()
+        click.echo(f"사용자 '{username}'이(가) 추가되었습니다.")
+    except db.IntegrityError:
+        click.echo(f"오류: 사용자 '{username}'은(는) 이미 존재합니다.")
+
+app.teardown_appcontext(close_db)
+app.cli.add_command(init_db_command)
+app.cli.add_command(add_user_command)
 
 def check_intersection(box1, box2):
     """두 개의 바운딩 박스가 겹치는지 확인하는 함수"""
@@ -35,7 +91,6 @@ def generate_frames():
 
 def generate_frames_for_stream(stream_id):
     """특정 스트림 ID에 대한 비디오 프레임을 생성하고 사고를 감지합니다."""
-    global latest_alert
     last_alert_time = 0
     alert_cooldown = 10  # 초 단위 (웹 알림은 더 짧게 설정 가능)
 
@@ -118,9 +173,12 @@ def generate_frames_for_stream(stream_id):
         # 충돌 감지 및 알림 생성
         if crashed_indices and (time.time() - last_alert_time > alert_cooldown):
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            latest_alert["message"] = f"[{stream_info.get('title', 'Unknown Video')}] 교통사고 의심!"
-            latest_alert["timestamp"] = timestamp
+            alert_message = f"[{stream_info.get('title', 'Unknown Video')}] 교통사고 의심!"
+            
+            # SSE 스트림으로 직접 보낼 알림 데이터 생성
+            alert_data = {"message": alert_message, "timestamp": timestamp}
             last_alert_time = time.time()
+            app.alert_queue.put(alert_data) # 큐에 알림 추가
             print(f"[{timestamp}] 사고 감지! 웹페이지에 알림을 보냅니다.")
 
         # 프레임을 JPEG로 인코딩
@@ -133,8 +191,13 @@ def generate_frames_for_stream(stream_id):
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    """메인 페이지를 렌더링합니다."""
+    """메인 페이지를 렌더링합니다. 로그인된 사용자만 접근 가능합니다."""    
     global video_streams
+    
+    if g.user is None:
+        return redirect(url_for('login'))
+
+    # POST 요청 처리 로직은 그대로 유지
     error_message = None
     youtube_urls_text = ""
 
@@ -180,24 +243,79 @@ def index():
     
     return render_template('index.html', streams=video_streams, youtube_urls_text=youtube_urls_text, error_message=error_message)
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """로그인 페이지를 처리합니다."""
+    if g.user:
+        return redirect(url_for('index'))
+
+    error = None
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        db = get_db()
+        user = db.execute(
+            'SELECT * FROM user WHERE username = ?', (username,)
+        ).fetchone()
+
+        if user is None:
+            error = '등록되지 않은 사용자입니다.'
+        elif not check_password_hash(user['password'], password):
+            error = '잘못된 비밀번호입니다.'
+
+        if error is None:
+            session.clear()
+            session['user_id'] = user['id']
+            return redirect(url_for('index'))
+        else:
+            flash(error)
+
+    return render_template('login.html', error=error)
+
+@app.route('/logout')
+def logout():
+    """로그아웃을 처리합니다."""
+    session.clear()
+    flash('로그아웃되었습니다.')
+    return redirect(url_for('login'))
+
+
 @app.route('/video_feed/<int:stream_id>')
 def video_feed(stream_id):
     """비디오 스트리밍 경로"""
+    if g.user is None:
+        return "Unauthorized", 401
     return Response(generate_frames_for_stream(stream_id), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/events')
 def events():
     """실시간 알림을 위한 Server-Sent Events 경로"""
+    if not hasattr(app, 'alert_queue'):
+        app.alert_queue = queue.Queue()
+
     def event_stream():
-        last_sent_timestamp = None
         while True:
-            # 새로운 알림이 있고, 이전에 보낸 알림과 다를 경우에만 전송
-            if latest_alert["timestamp"] and latest_alert["timestamp"] != last_sent_timestamp:
-                data = json.dumps(latest_alert)
+            try:
+                # 큐에서 새로운 알림을 기다림 (블로킹)
+                alert_data = app.alert_queue.get(timeout=60) 
+                data = json.dumps(alert_data)
                 yield f"data: {data}\n\n"
-                last_sent_timestamp = latest_alert["timestamp"]
-            time.sleep(1) # 1초마다 새로운 알림 확인
+            except queue.Empty:
+                # 타임아웃 동안 메시지가 없으면 연결 유지를 위해 주석 메시지 전송
+                yield ": keep-alive\n\n"
     return Response(event_stream(), mimetype="text/event-stream")
+
+@app.before_request
+def load_logged_in_user():
+    """요청이 처리되기 전에 로그인된 사용자를 확인합니다."""
+    user_id = session.get('user_id')
+
+    if user_id is None:
+        g.user = None
+    else:
+        g.user = get_db().execute(
+            'SELECT * FROM user WHERE id = ?', (user_id,)
+        ).fetchone()
 
 @app.route('/about')
 def about():
@@ -206,4 +324,4 @@ def about():
 
 if __name__ == '__main__':
     # host='0.0.0.0'으로 설정하면 동일 네트워크의 다른 기기에서도 접속 가능
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
